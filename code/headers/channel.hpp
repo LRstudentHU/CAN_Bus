@@ -98,6 +98,18 @@ namespace r2d2::can_bus {
         // send interrupt.
         inline static queue_c<detail::_can_frame_s, 32> tx_queue;
 
+        static send_frame_impl(const _can_frame_s &frame) {
+            while (tx_queue.full()) {}
+
+            tx_queue.push(frame);
+
+            // Enabling the interrupt on the CAN mailbox with the TX id
+            // will cause a interrupt when the CAN controller is ready.
+            // At that point will the frame be removed from the tx_queue
+            // and put on the bus.
+            port<Bus>->CAN_IER = (0x01 << ids::tx);
+        }
+
     public:
         /**
          * Initialize the channel mailboxes.
@@ -145,10 +157,19 @@ namespace r2d2::can_bus {
 
         /**
          * Send a frame on this channel.
-         *
-         * @param frame
+         * 
+         * @tparam T 
+         * @tparam std::enable_if_t<
+! is_extended_frame_v<T>
+> 
+         * @param data 
          */
-        template<typename T>
+        template<
+            typename T,
+            typename = std::enable_if_t<
+                ! is_extended_frame_v<T>
+            >
+        >
         static void send_frame(const T &data) {
             detail::_can_frame_s frame{};
 
@@ -161,15 +182,58 @@ namespace r2d2::can_bus {
             frame.length = sizeof(T);
             frame.frame_type = frame_type_v<T>;
 
-            while (tx_queue.full()) {}
+           send_frame_impl(frame);
+        }
 
-            tx_queue.push(frame);
+        /**
+         * Send a frame on this channel.
+         * 
+         * @tparam T 
+         * @tparam std::enable_if_t<
+is_extended_frame_v<T>
+> 
+         * @param data 
+         */
+        template<
+            typename T,
+            typename = std::enable_if_t<
+                is_extended_frame_v<T>
+            >
+        >
+        static void send_frame(const T &data) {
+            constexpr uint_fast8_t frame_count = sizeof(T) / 8;
+            constexpr uint_fast8_t rest = sizeof(T) % 8;
 
-            // Enabling the interrupt on the CAN mailbox with the TX id
-            // will cause a interrupt when the CAN controller is ready.
-            // At that point will the frame be removed from the tx_queue
-            // and put on the bus.
-            port<Bus>->CAN_IER = (0x01 << ids::tx);
+            for (uint_fast8_t i = 0; i < frame_count; i++) {
+                detail::_can_frame_s frame{};
+
+                memcpy(
+                    (void *) frame.data.bytes,
+                    (const void *) (&data + (i * 8)),
+                    8
+                );
+
+                frame.length = 8;
+                frame.frame_type = frame_type_v<T>;
+
+                send_frame_impl(frame);
+            }
+
+            // Send the remaining bytes
+            if (rest == 0) {
+                return;
+            }
+
+            detail::_can_frame_s frame{};
+
+            memcpy(
+                (void *) frame.data.bytes,
+                (const void *) (&data + (sizeof(T) - rest)),
+                rest
+            );
+
+            frame.length = rest;
+            frame.frame_type = frame_type_v<T>;
         }
 
         /**
